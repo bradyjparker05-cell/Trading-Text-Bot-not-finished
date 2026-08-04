@@ -11,14 +11,28 @@ TICKERS = {
     "MSFT": "Microsoft",
     "AAPL": "Apple",
     "SPY": "SPDR S&P 500 ETF",
+    "NVDA": "NVIDIA",
+    "GOOGL": "Alphabet",
+    "AMZN": "Amazon",
+    "META": "Meta Platforms",
+    "TSLA": "Tesla",
 }
+
+MARKET_SCAN_SCREENS = ["most_actives", "day_gainers", "day_losers"]
+MARKET_SCAN_LIMIT = 5
 
 SUBREDDITS = ["wallstreetbets", "stocks", "investing"]
 
-CONGRESS_FEEDS = [
-    "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json",
-    "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json",
-]
+CONGRESS_FEEDS = {
+    "senate": [
+        "https://senatestockwatcher.com/api/all_transactions",
+        "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json",
+    ],
+    "house": [
+        "https://housestockwatcher.com/api/all_transactions",
+        "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json",
+    ],
+}
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -121,14 +135,24 @@ def fetch_congress_trades(tickers, days=45):
     cutoff = datetime.now() - timedelta(days=days)
     counts = {t: {"buys": 0, "sells": 0} for t in tickers}
 
-    for url in CONGRESS_FEEDS:
-        try:
-            req = urllib.request.Request(url, headers=BROWSER_HEADERS)
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                records = json.loads(resp.read().decode())
-            print(f"[congress] fetched {len(records)} records from {url}")
-        except Exception as e:
-            print(f"[congress] FAILED fetching {url}: {e}")
+    for chamber, urls in CONGRESS_FEEDS.items():
+        records = None
+        used_url = None
+
+        for url in urls:
+            try:
+                req = urllib.request.Request(url, headers=BROWSER_HEADERS)
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    records = json.loads(resp.read().decode())
+                used_url = url
+                print(f"[congress] {chamber}: fetched {len(records)} records from {url}")
+                break
+            except Exception as e:
+                print(f"[congress] {chamber}: FAILED fetching {url}: {e}")
+                continue
+
+        if records is None:
+            print(f"[congress] {chamber}: all sources failed, skipping")
             continue
 
         matched = 0
@@ -155,7 +179,7 @@ def fetch_congress_trades(tickers, days=45):
             elif "sale" in tx_type or "sell" in tx_type:
                 counts[ticker]["sells"] += 1
 
-        print(f"[congress] {matched} records matched tracked tickers within {days} days from {url}")
+        print(f"[congress] {chamber}: {matched} records matched tracked tickers within {days} days from {used_url}")
 
     print(f"[congress] final counts: {counts}")
     return counts
@@ -306,58 +330,118 @@ def fetch_analyst_consensus(ticker):
         return None
 
 
+def _analyze_ticker(ticker, name, reddit_mentions, congress_trades):
+    t = yf.Ticker(ticker)
+    hist = t.history(period="4mo")
+
+    if hist.empty:
+        return {
+            "name": name, "price": None, "change_pct": None, "news": [],
+            "signal": {"score": 50, "signal": "HOLD", "confidence": 0, "reasoning": "No data."},
+            "analyst_consensus": None,
+            "congress": None,
+        }
+
+    closes = hist["Close"].tolist()
+    volumes = hist["Volume"].tolist()
+    last_close = float(closes[-1])
+    prev_close = float(closes[-2]) if len(closes) > 1 else last_close
+    change_pct = ((last_close - prev_close) / prev_close) * 100 if prev_close else 0.0
+
+    news_items = []
+    try:
+        for item in t.news[:3]:
+            content = item.get("content", item)
+            title = content.get("title") or item.get("title")
+            link = (content.get("clickThroughUrl") or {}).get("url") or item.get("link")
+            if title and link:
+                news_items.append({"title": title, "link": link})
+    except Exception:
+        pass
+
+    stocktwits = fetch_stocktwits_sentiment(ticker)
+    analyst_consensus = fetch_analyst_consensus(ticker)
+    congress = congress_trades.get(ticker)
+    signal = compute_signal(
+        closes, volumes, reddit_mentions.get(ticker, 0), stocktwits,
+        analyst_consensus=analyst_consensus, congress=congress,
+    )
+
+    return {
+        "name": name,
+        "price": round(last_close, 2),
+        "change_pct": round(change_pct, 2),
+        "news": news_items,
+        "signal": signal,
+        "analyst_consensus": analyst_consensus,
+        "congress": congress,
+    }
+
+
+def fetch_market_scan(exclude_tickers, limit=MARKET_SCAN_LIMIT):
+    candidates = {}
+
+    for screen_id in MARKET_SCAN_SCREENS:
+        try:
+            resp = yf.screen(screen_id, size=25)
+            quotes = resp.get("quotes", [])
+            print(f"[market_scan] {screen_id}: {len(quotes)} quotes")
+        except Exception as e:
+            print(f"[market_scan] FAILED {screen_id}: {e}")
+            continue
+
+        for q in quotes:
+            symbol = q.get("symbol")
+            if not symbol or symbol in exclude_tickers:
+                continue
+
+            change = q.get("regularMarketChangePercent") or 0
+            volume = q.get("regularMarketVolume") or 0
+            avg_volume = q.get("averageDailyVolume3Month") or 0
+            name = q.get("shortName") or q.get("longName") or symbol
+
+            score = abs(change)
+            if avg_volume and volume:
+                score += min(volume / avg_volume, 5)
+
+            if symbol not in candidates or score > candidates[symbol]["score"]:
+                candidates[symbol] = {
+                    "symbol": symbol, "name": name, "change": change,
+                    "score": score, "source": screen_id,
+                }
+
+    ranked = sorted(candidates.values(), key=lambda c: c["score"], reverse=True)
+    top = ranked[:limit]
+    print(f"[market_scan] surfaced: {[c['symbol'] for c in top]}")
+    return top
+
+
 def fetch_stock_data():
     data = {}
     reddit_mentions = fetch_reddit_mentions(list(TICKERS.keys()))
     congress_trades = fetch_congress_trades(list(TICKERS.keys()))
 
     for ticker, name in TICKERS.items():
-        t = yf.Ticker(ticker)
-        hist = t.history(period="4mo")
+        data[ticker] = _analyze_ticker(ticker, name, reddit_mentions, congress_trades)
 
-        if hist.empty:
-            data[ticker] = {
-                "name": name, "price": None, "change_pct": None, "news": [],
-                "signal": {"score": 50, "signal": "HOLD", "confidence": 0, "reasoning": "No data."},
-                "analyst_consensus": None,
-                "congress": None,
-            }
-            continue
+    return data
 
-        closes = hist["Close"].tolist()
-        volumes = hist["Volume"].tolist()
-        last_close = float(closes[-1])
-        prev_close = float(closes[-2]) if len(closes) > 1 else last_close
-        change_pct = ((last_close - prev_close) / prev_close) * 100 if prev_close else 0.0
 
-        news_items = []
-        try:
-            for item in t.news[:3]:
-                content = item.get("content", item)
-                title = content.get("title") or item.get("title")
-                link = (content.get("clickThroughUrl") or {}).get("url") or item.get("link")
-                if title and link:
-                    news_items.append({"title": title, "link": link})
-        except Exception:
-            pass
+def fetch_market_scan_data():
+    scan_hits = fetch_market_scan(set(TICKERS.keys()))
+    if not scan_hits:
+        return {}
 
-        stocktwits = fetch_stocktwits_sentiment(ticker)
-        analyst_consensus = fetch_analyst_consensus(ticker)
-        congress = congress_trades.get(ticker)
-        signal = compute_signal(
-            closes, volumes, reddit_mentions.get(ticker, 0), stocktwits,
-            analyst_consensus=analyst_consensus, congress=congress,
-        )
+    scan_tickers = [c["symbol"] for c in scan_hits]
+    reddit_mentions = fetch_reddit_mentions(scan_tickers)
+    congress_trades = fetch_congress_trades(scan_tickers)
 
-        data[ticker] = {
-            "name": name,
-            "price": round(last_close, 2),
-            "change_pct": round(change_pct, 2),
-            "news": news_items,
-            "signal": signal,
-            "analyst_consensus": analyst_consensus,
-            "congress": congress,
-        }
+    data = {}
+    for c in scan_hits:
+        ticker = c["symbol"]
+        analyzed = _analyze_ticker(ticker, c["name"], reddit_mentions, congress_trades)
+        analyzed["scan_source"] = c["source"]
+        data[ticker] = analyzed
 
     return data
 
@@ -435,6 +519,7 @@ def _estimate_fear_greed():
 def fetch_all():
     return {
         "stocks": fetch_stock_data(),
+        "market_scan": fetch_market_scan_data(),
         "macro": fetch_macro_data(),
         "fear_greed": fetch_fear_greed(),
         "reddit": fetch_reddit_top_posts(),
