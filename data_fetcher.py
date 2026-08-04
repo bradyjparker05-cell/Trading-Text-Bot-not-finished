@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import urllib.request
 
@@ -186,12 +187,44 @@ def compute_signal(closes, volumes, reddit_mentions, stocktwits):
     agreeing = sum(1 for v in votes if (v > 0) == (avg_vote > 0) or v == 0)
     confidence = round((agreeing / len(votes)) * 100)
 
+    if rsi is not None and rsi >= 75 and signal == "BUY":
+        signal = "HOLD"
+        reasons.append("⚠ overbought — trend is strong but chasing here is risky")
+    elif rsi is not None and rsi <= 25 and signal == "REDUCE":
+        signal = "HOLD"
+        reasons.append("⚠ oversold — trend is weak but may already reflect bad news")
+
     return {
         "score": score,
         "signal": signal,
         "confidence": confidence,
         "reasoning": "; ".join(reasons),
     }
+
+
+def fetch_analyst_consensus(ticker):
+    api_key = os.environ.get("FINNHUB_API_KEY")
+    if not api_key:
+        return None
+
+    url = f"https://finnhub.io/api/v1/stock/recommendation?symbol={ticker}&token={api_key}"
+    try:
+        req = urllib.request.Request(url, headers=BROWSER_HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode())
+        if not payload:
+            return None
+        latest = payload[0]
+        return {
+            "period": latest.get("period"),
+            "strong_buy": latest.get("strongBuy", 0),
+            "buy": latest.get("buy", 0),
+            "hold": latest.get("hold", 0),
+            "sell": latest.get("sell", 0),
+            "strong_sell": latest.get("strongSell", 0),
+        }
+    except Exception:
+        return None
 
 
 def fetch_stock_data():
@@ -206,6 +239,7 @@ def fetch_stock_data():
             data[ticker] = {
                 "name": name, "price": None, "change_pct": None, "news": [],
                 "signal": {"score": 50, "signal": "HOLD", "confidence": 0, "reasoning": "No data."},
+                "analyst_consensus": None,
             }
             continue
 
@@ -228,6 +262,7 @@ def fetch_stock_data():
 
         stocktwits = fetch_stocktwits_sentiment(ticker)
         signal = compute_signal(closes, volumes, reddit_mentions.get(ticker, 0), stocktwits)
+        analyst_consensus = fetch_analyst_consensus(ticker)
 
         data[ticker] = {
             "name": name,
@@ -235,6 +270,7 @@ def fetch_stock_data():
             "change_pct": round(change_pct, 2),
             "news": news_items,
             "signal": signal,
+            "analyst_consensus": analyst_consensus,
         }
 
     return data
