@@ -151,8 +151,16 @@ def build_email(data):
     fg_score_str = f"{fg_score}/100" if fg_score is not None else "N/A"
     fg_note = " (estimated from VIX)" if fear_greed.get("estimated") and fg_score is not None else ""
 
-    rows_html = "".join(_stock_row(ticker, info) for ticker, info in stocks.items())
-    scan_rows_html = "".join(_stock_row(ticker, info) for ticker, info in market_scan.items())
+    def _sort_key(item):
+        ticker, info = item
+        signal = info.get("signal", {})
+        return (signal.get("score", 50), signal.get("confidence", 0))
+
+    sorted_stocks = sorted(stocks.items(), key=_sort_key, reverse=True)
+    sorted_scan = sorted(market_scan.items(), key=_sort_key, reverse=True)
+
+    rows_html = "".join(_stock_row(ticker, info) for ticker, info in sorted_stocks)
+    scan_rows_html = "".join(_stock_row(ticker, info) for ticker, info in sorted_scan)
     reddit_html = _reddit_section(reddit)
 
     valid_changes = [i["change_pct"] for i in stocks.values() if i["change_pct"] is not None]
