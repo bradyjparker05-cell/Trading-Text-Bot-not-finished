@@ -43,6 +43,24 @@ def _gauge_bar(score):
     """
 
 
+def _analyst_consensus_html(consensus):
+    if not consensus:
+        return ""
+    total = (consensus["strong_buy"] + consensus["buy"] + consensus["hold"]
+             + consensus["sell"] + consensus["strong_sell"])
+    if total == 0:
+        return ""
+    buy_total = consensus["strong_buy"] + consensus["buy"]
+    return (
+        f'<div style="font-size:11px;color:{GRAY};margin-top:4px;">'
+        f'Wall Street ({consensus.get("period","")}): '
+        f'<strong style="color:{NAVY};">{buy_total} Buy</strong> · '
+        f'{consensus["hold"]} Hold · '
+        f'{consensus["sell"] + consensus["strong_sell"]} Sell '
+        f'({total} analysts)</div>'
+    )
+
+
 def _stock_row(ticker, info):
     price = f"${info['price']:,.2f}" if info["price"] is not None else "N/A"
     change = info["change_pct"]
@@ -60,6 +78,8 @@ def _stock_row(ticker, info):
     for item in info.get("news", [])[:2]:
         news_html += f'<div style="font-size:12px;margin-top:4px;"><a href="{item["link"]}" style="color:{NAVY};text-decoration:none;">&#8226; {item["title"]}</a></div>'
 
+    consensus_html = _analyst_consensus_html(info.get("analyst_consensus"))
+
     return f"""
     <tr style="border-bottom:1px solid #e2e6ea;">
         <td style="padding:12px 8px;">
@@ -73,6 +93,7 @@ def _stock_row(ticker, info):
         <td colspan="3" style="padding:0 8px 4px 8px;">
             {sig_pill} <span style="font-size:11px;color:{GRAY};">signal confidence {sig_conf}%</span>
             <div style="font-size:12px;color:{GRAY};margin-top:4px;">{sig_reason}</div>
+            {consensus_html}
             {news_html}
         </td>
     </tr>
