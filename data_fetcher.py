@@ -15,6 +15,11 @@ TICKERS = {
 
 SUBREDDITS = ["wallstreetbets", "stocks", "investing"]
 
+CONGRESS_FEEDS = [
+    "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json",
+    "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json",
+]
+
 BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -110,7 +115,46 @@ def fetch_reddit_top_posts(limit=5):
     return posts
 
 
-def compute_signal(closes, volumes, reddit_mentions, stocktwits):
+def fetch_congress_trades(tickers, days=45):
+    from datetime import datetime, timedelta
+
+    cutoff = datetime.now() - timedelta(days=days)
+    counts = {t: {"buys": 0, "sells": 0} for t in tickers}
+
+    for url in CONGRESS_FEEDS:
+        try:
+            req = urllib.request.Request(url, headers=BROWSER_HEADERS)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                records = json.loads(resp.read().decode())
+        except Exception:
+            continue
+
+        for rec in records:
+            ticker = (rec.get("ticker") or "").strip().upper()
+            if ticker not in tickers:
+                continue
+
+            date_str = rec.get("transaction_date") or rec.get("disclosure_date") or ""
+            parsed = None
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+                try:
+                    parsed = datetime.strptime(date_str, fmt)
+                    break
+                except ValueError:
+                    continue
+            if parsed is None or parsed < cutoff:
+                continue
+
+            tx_type = (rec.get("type") or rec.get("transaction_type") or "").lower()
+            if "purchase" in tx_type or "buy" in tx_type:
+                counts[ticker]["buys"] += 1
+            elif "sale" in tx_type or "sell" in tx_type:
+                counts[ticker]["sells"] += 1
+
+    return counts
+
+
+def compute_signal(closes, volumes, reddit_mentions, stocktwits, analyst_consensus=None, congress=None):
     votes = []
     reasons = []
 
@@ -169,6 +213,34 @@ def compute_signal(closes, volumes, reddit_mentions, stocktwits):
     if reddit_mentions >= 3:
         votes.append(1)
         reasons.append(f"{reddit_mentions} Reddit mentions today")
+
+    if analyst_consensus:
+        buy_total = analyst_consensus.get("strong_buy", 0) + analyst_consensus.get("buy", 0)
+        sell_total = analyst_consensus.get("sell", 0) + analyst_consensus.get("strong_sell", 0)
+        hold_total = analyst_consensus.get("hold", 0)
+        total = buy_total + sell_total + hold_total
+        if total >= 5:
+            ratio = buy_total / total
+            if ratio > 0.6:
+                votes.extend([1, 1])
+                reasons.append(f"Wall Street {ratio:.0%} buy-rated ({total} analysts)")
+            elif ratio < 0.4:
+                votes.extend([-1, -1])
+                reasons.append(f"Wall Street {ratio:.0%} buy-rated ({total} analysts)")
+            else:
+                votes.extend([0, 0])
+                reasons.append(f"Wall Street split {ratio:.0%} buy-rated ({total} analysts)")
+
+    if congress:
+        buys, sells = congress.get("buys", 0), congress.get("sells", 0)
+        net = buys - sells
+        if buys + sells >= 2:
+            if net > 0:
+                votes.append(1)
+                reasons.append(f"Congress: {buys} buys vs {sells} sells (last 45 days)")
+            elif net < 0:
+                votes.append(-1)
+                reasons.append(f"Congress: {buys} buys vs {sells} sells (last 45 days)")
 
     if not votes:
         return {"score": 50, "signal": "HOLD", "confidence": 0, "reasoning": "Not enough data."}
@@ -230,6 +302,7 @@ def fetch_analyst_consensus(ticker):
 def fetch_stock_data():
     data = {}
     reddit_mentions = fetch_reddit_mentions(list(TICKERS.keys()))
+    congress_trades = fetch_congress_trades(list(TICKERS.keys()))
 
     for ticker, name in TICKERS.items():
         t = yf.Ticker(ticker)
@@ -240,6 +313,7 @@ def fetch_stock_data():
                 "name": name, "price": None, "change_pct": None, "news": [],
                 "signal": {"score": 50, "signal": "HOLD", "confidence": 0, "reasoning": "No data."},
                 "analyst_consensus": None,
+                "congress": None,
             }
             continue
 
@@ -261,8 +335,12 @@ def fetch_stock_data():
             pass
 
         stocktwits = fetch_stocktwits_sentiment(ticker)
-        signal = compute_signal(closes, volumes, reddit_mentions.get(ticker, 0), stocktwits)
         analyst_consensus = fetch_analyst_consensus(ticker)
+        congress = congress_trades.get(ticker)
+        signal = compute_signal(
+            closes, volumes, reddit_mentions.get(ticker, 0), stocktwits,
+            analyst_consensus=analyst_consensus, congress=congress,
+        )
 
         data[ticker] = {
             "name": name,
@@ -271,6 +349,7 @@ def fetch_stock_data():
             "news": news_items,
             "signal": signal,
             "analyst_consensus": analyst_consensus,
+            "congress": congress,
         }
 
     return data
