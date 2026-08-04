@@ -73,7 +73,7 @@ def _congress_html(congress):
     )
 
 
-def _stock_row(ticker, info):
+def _stock_row(ticker, info, section_label=None):
     price = f"${info['price']:,.2f}" if info["price"] is not None else "N/A"
     change = info["change_pct"]
     change_str = f"{change:+.2f}%" if change is not None else "N/A"
@@ -86,6 +86,11 @@ def _stock_row(ticker, info):
     sig_reason = signal.get("reasoning", "")
     sig_pill = _pill(f"{sig_label} · {sig_score}/100", _signal_color(sig_label))
 
+    scan_badge = ""
+    if info.get("scan_source"):
+        label = info["scan_source"].replace("_", " ").title()
+        scan_badge = f'<span style="font-size:10px;color:{GRAY};margin-left:6px;">via {label}</span>'
+
     news_html = ""
     for item in info.get("news", [])[:2]:
         news_html += f'<div style="font-size:12px;margin-top:4px;"><a href="{item["link"]}" style="color:{NAVY};text-decoration:none;">&#8226; {item["title"]}</a></div>'
@@ -96,7 +101,7 @@ def _stock_row(ticker, info):
     return f"""
     <tr style="border-bottom:1px solid #e2e6ea;">
         <td style="padding:12px 8px;">
-            <strong>{ticker}</strong><br>
+            <strong>{ticker}</strong>{scan_badge}<br>
             <span style="font-size:12px;color:{GRAY};">{info['name']}</span>
         </td>
         <td style="padding:12px 8px;text-align:right;">{price}</td>
@@ -131,6 +136,7 @@ def _reddit_section(posts):
 def build_email(data):
     today = datetime.now().strftime("%A, %B %d, %Y")
     stocks = data["stocks"]
+    market_scan = data.get("market_scan", {})
     macro = data["macro"]
     fear_greed = data["fear_greed"]
     reddit = data["reddit"]
@@ -146,11 +152,26 @@ def build_email(data):
     fg_note = " (estimated from VIX)" if fear_greed.get("estimated") and fg_score is not None else ""
 
     rows_html = "".join(_stock_row(ticker, info) for ticker, info in stocks.items())
+    scan_rows_html = "".join(_stock_row(ticker, info) for ticker, info in market_scan.items())
     reddit_html = _reddit_section(reddit)
 
     valid_changes = [i["change_pct"] for i in stocks.values() if i["change_pct"] is not None]
     avg_change = round(sum(valid_changes) / len(valid_changes), 2) if valid_changes else None
     avg_str = f"{avg_change:+.2f}%" if avg_change is not None else "N/A"
+
+    scan_section = ""
+    if scan_rows_html:
+        scan_section = f"""
+        <tr>
+            <td style="padding:20px 28px 0 28px;">
+                <h3 style="margin:0 0 8px 0;font-size:14px;color:{NAVY};">Market Scan Highlights</h3>
+                <p style="margin:0 0 8px 0;font-size:11px;color:{GRAY};">Surfaced from today's most active, biggest-gaining, and biggest-losing stocks market-wide — not in your core watchlist.</p>
+                <table width="100%" cellpadding="0" cellspacing="0">
+                    {scan_rows_html}
+                </table>
+            </td>
+        </tr>
+        """
 
     html = f"""
     <html>
@@ -178,13 +199,15 @@ def build_email(data):
                         </tr>
                         <tr>
                             <td style="padding:0 28px 8px 28px;">
+                                <h3 style="margin:0 0 8px 0;font-size:14px;color:{NAVY};">Your Watchlist</h3>
                                 <table width="100%" cellpadding="0" cellspacing="0">
                                     {rows_html}
                                 </table>
                             </td>
                         </tr>
+                        {scan_section}
                         <tr>
-                            <td style="padding:0 28px 28px 28px;">
+                            <td style="padding:20px 28px 28px 28px;">
                                 {reddit_html}
                             </td>
                         </tr>
