@@ -60,7 +60,7 @@ def fetch_macro_data():
     try:
         tnx_hist = yf.Ticker("^TNX").history(period="1d")
         if not tnx_hist.empty:
-            macro["treasury_10y"] = round(float(tnx_hist["Close"].iloc[-1]) / 10, 2)
+            macro["treasury_10y"] = round(float(tnx_hist["Close"].iloc[-1]), 2)
     except Exception:
         pass
 
@@ -69,7 +69,15 @@ def fetch_macro_data():
 
 def fetch_fear_greed():
     url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.cnn.com/markets/fear-and-greed",
+        "Origin": "https://www.cnn.com",
+    }
 
     try:
         req = urllib.request.Request(url, headers=headers)
