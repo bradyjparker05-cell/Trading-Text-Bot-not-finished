@@ -188,6 +188,7 @@ def fetch_congress_trades(tickers, days=45):
 def compute_signal(closes, volumes, reddit_mentions, stocktwits, analyst_consensus=None, congress=None):
     votes = []
     reasons = []
+    momentum = None
 
     rsi = _rsi(closes)
     if rsi is not None:
@@ -279,6 +280,19 @@ def compute_signal(closes, volumes, reddit_mentions, stocktwits, analyst_consens
     avg_vote = sum(votes) / len(votes)
     score = round(50 + avg_vote * 50)
     score = max(0, min(100, score))
+
+    if momentum is not None:
+        normal_range = 5.0
+        excess = max(0.0, abs(momentum) - normal_range)
+        chase_penalty = min(45, (2 ** (excess / 5)) - 1)
+        if chase_penalty >= 1:
+            direction = 1 if momentum > 0 else -1
+            score = round(score - direction * chase_penalty)
+            score = max(0, min(100, score))
+            reasons.append(
+                f"⚠ chase-risk: {momentum:+.1f}% over 5 days is far outside a normal range "
+                f"(-{chase_penalty:.0f} pt penalty applied)"
+            )
 
     if score >= 65:
         signal = "BUY"
