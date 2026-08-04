@@ -61,6 +61,18 @@ def _analyst_consensus_html(consensus):
     )
 
 
+def _congress_html(congress):
+    if not congress:
+        return ""
+    buys, sells = congress.get("buys", 0), congress.get("sells", 0)
+    if buys + sells == 0:
+        return ""
+    return (
+        f'<div style="font-size:11px;color:{GRAY};margin-top:2px;">'
+        f'Congress (45d): <strong style="color:{NAVY};">{buys} buys</strong> · {sells} sells</div>'
+    )
+
+
 def _stock_row(ticker, info):
     price = f"${info['price']:,.2f}" if info["price"] is not None else "N/A"
     change = info["change_pct"]
@@ -79,6 +91,7 @@ def _stock_row(ticker, info):
         news_html += f'<div style="font-size:12px;margin-top:4px;"><a href="{item["link"]}" style="color:{NAVY};text-decoration:none;">&#8226; {item["title"]}</a></div>'
 
     consensus_html = _analyst_consensus_html(info.get("analyst_consensus"))
+    congress_html = _congress_html(info.get("congress"))
 
     return f"""
     <tr style="border-bottom:1px solid #e2e6ea;">
@@ -94,6 +107,7 @@ def _stock_row(ticker, info):
             {sig_pill} <span style="font-size:11px;color:{GRAY};">signal confidence {sig_conf}%</span>
             <div style="font-size:12px;color:{GRAY};margin-top:4px;">{sig_reason}</div>
             {consensus_html}
+            {congress_html}
             {news_html}
         </td>
     </tr>
