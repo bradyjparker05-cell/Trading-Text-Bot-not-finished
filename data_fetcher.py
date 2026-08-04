@@ -1,4 +1,5 @@
 import json
+import re
 import urllib.request
 
 import yfinance as yf
@@ -11,19 +12,207 @@ TICKERS = {
     "SPY": "SPDR S&P 500 ETF",
 }
 
+SUBREDDITS = ["wallstreetbets", "stocks", "investing"]
+
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+}
+
+
+def _rsi(closes, period=14):
+    if len(closes) < period + 1:
+        return None
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 1)
+
+
+def _sma(closes, period):
+    if len(closes) < period:
+        return None
+    return sum(closes[-period:]) / period
+
+
+def fetch_stocktwits_sentiment(ticker):
+    url = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
+    bullish, bearish = 0, 0
+    try:
+        req = urllib.request.Request(url, headers=BROWSER_HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode())
+        for msg in payload.get("messages", []):
+            sentiment = (msg.get("entities", {}) or {}).get("sentiment") or {}
+            basic = sentiment.get("basic")
+            if basic == "Bullish":
+                bullish += 1
+            elif basic == "Bearish":
+                bearish += 1
+    except Exception:
+        pass
+    return {"bullish": bullish, "bearish": bearish}
+
+
+def fetch_reddit_mentions(tickers, posts_per_sub=25):
+    mention_counts = {t: 0 for t in tickers}
+    pattern = re.compile(r"\b(" + "|".join(re.escape(t) for t in tickers) + r")\b")
+
+    for sub in SUBREDDITS:
+        url = f"https://www.reddit.com/r/{sub}/hot.json?limit={posts_per_sub}"
+        headers = {**BROWSER_HEADERS, "User-Agent": "market-newsletter-bot/1.0"}
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode())
+            for child in payload.get("data", {}).get("children", []):
+                title = (child.get("data", {}) or {}).get("title", "")
+                for match in pattern.findall(title.upper()):
+                    mention_counts[match] += 1
+        except Exception:
+            continue
+
+    return mention_counts
+
+
+def fetch_reddit_top_posts(limit=5):
+    url = f"https://www.reddit.com/r/wallstreetbets/hot.json?limit={limit}"
+    headers = {**BROWSER_HEADERS, "User-Agent": "market-newsletter-bot/1.0"}
+    posts = []
+
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode())
+        for child in payload.get("data", {}).get("children", []):
+            post = child.get("data", {})
+            title = post.get("title")
+            permalink = post.get("permalink")
+            score = post.get("score")
+            if title and permalink:
+                posts.append({
+                    "title": title,
+                    "link": f"https://www.reddit.com{permalink}",
+                    "score": score,
+                })
+    except Exception:
+        pass
+
+    return posts
+
+
+def compute_signal(closes, volumes, reddit_mentions, stocktwits):
+    votes = []
+    reasons = []
+
+    rsi = _rsi(closes)
+    if rsi is not None:
+        if rsi >= 70:
+            votes.append(-1)
+            reasons.append(f"RSI {rsi} (overbought)")
+        elif rsi <= 30:
+            votes.append(1)
+            reasons.append(f"RSI {rsi} (oversold)")
+        else:
+            votes.append(0)
+            reasons.append(f"RSI {rsi} (neutral)")
+
+    sma20 = _sma(closes, 20)
+    sma50 = _sma(closes, 50)
+    if sma20 and sma50:
+        if closes[-1] > sma20 > sma50:
+            votes.append(1)
+            reasons.append("price above 20/50-day MA (uptrend)")
+        elif closes[-1] < sma20 < sma50:
+            votes.append(-1)
+            reasons.append("price below 20/50-day MA (downtrend)")
+        else:
+            votes.append(0)
+            reasons.append("mixed moving average trend")
+
+    if len(closes) >= 6:
+        momentum = ((closes[-1] - closes[-6]) / closes[-6]) * 100
+        if momentum > 2:
+            votes.append(1)
+        elif momentum < -2:
+            votes.append(-1)
+        else:
+            votes.append(0)
+        reasons.append(f"momentum {momentum:+.1f}% over 5 days")
+
+    if len(volumes) >= 20 and volumes[-1]:
+        avg_vol = sum(volumes[-20:]) / 20
+        vol_ratio = volumes[-1] / avg_vol if avg_vol else 1
+        if vol_ratio > 1.5:
+            votes.append(1 if votes and sum(votes) >= 0 else -1)
+            reasons.append(f"volume {vol_ratio:.1f}x average")
+
+    bullish, bearish = stocktwits.get("bullish", 0), stocktwits.get("bearish", 0)
+    if bullish + bearish >= 5:
+        ratio = bullish / (bullish + bearish)
+        if ratio > 0.6:
+            votes.append(1)
+            reasons.append(f"StockTwits {ratio:.0%} bullish")
+        elif ratio < 0.4:
+            votes.append(-1)
+            reasons.append(f"StockTwits {ratio:.0%} bullish")
+
+    if reddit_mentions >= 3:
+        votes.append(1)
+        reasons.append(f"{reddit_mentions} Reddit mentions today")
+
+    if not votes:
+        return {"score": 50, "signal": "HOLD", "confidence": 0, "reasoning": "Not enough data."}
+
+    avg_vote = sum(votes) / len(votes)
+    score = round(50 + avg_vote * 50)
+    score = max(0, min(100, score))
+
+    if score >= 65:
+        signal = "BUY"
+    elif score <= 35:
+        signal = "REDUCE"
+    else:
+        signal = "HOLD"
+
+    agreeing = sum(1 for v in votes if (v > 0) == (avg_vote > 0) or v == 0)
+    confidence = round((agreeing / len(votes)) * 100)
+
+    return {
+        "score": score,
+        "signal": signal,
+        "confidence": confidence,
+        "reasoning": "; ".join(reasons),
+    }
+
 
 def fetch_stock_data():
     data = {}
+    reddit_mentions = fetch_reddit_mentions(list(TICKERS.keys()))
+
     for ticker, name in TICKERS.items():
         t = yf.Ticker(ticker)
-        hist = t.history(period="5d")
+        hist = t.history(period="4mo")
 
         if hist.empty:
-            data[ticker] = {"name": name, "price": None, "change_pct": None, "news": []}
+            data[ticker] = {
+                "name": name, "price": None, "change_pct": None, "news": [],
+                "signal": {"score": 50, "signal": "HOLD", "confidence": 0, "reasoning": "No data."},
+            }
             continue
 
-        last_close = float(hist["Close"].iloc[-1])
-        prev_close = float(hist["Close"].iloc[-2]) if len(hist) > 1 else last_close
+        closes = hist["Close"].tolist()
+        volumes = hist["Volume"].tolist()
+        last_close = float(closes[-1])
+        prev_close = float(closes[-2]) if len(closes) > 1 else last_close
         change_pct = ((last_close - prev_close) / prev_close) * 100 if prev_close else 0.0
 
         news_items = []
@@ -37,11 +226,15 @@ def fetch_stock_data():
         except Exception:
             pass
 
+        stocktwits = fetch_stocktwits_sentiment(ticker)
+        signal = compute_signal(closes, volumes, reddit_mentions.get(ticker, 0), stocktwits)
+
         data[ticker] = {
             "name": name,
             "price": round(last_close, 2),
             "change_pct": round(change_pct, 2),
             "news": news_items,
+            "signal": signal,
         }
 
     return data
@@ -70,11 +263,7 @@ def fetch_macro_data():
 def fetch_fear_greed():
     url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/plain, */*",
+        **BROWSER_HEADERS,
         "Referer": "https://www.cnn.com/markets/fear-and-greed",
         "Origin": "https://www.cnn.com",
     }
@@ -87,37 +276,38 @@ def fetch_fear_greed():
         score = fg.get("score")
         rating = fg.get("rating")
         if score is not None:
-            return {"score": round(float(score)), "rating": rating}
+            return {"score": round(float(score)), "rating": rating, "estimated": False}
     except Exception:
         pass
 
-    return {"score": None, "rating": None}
+    return _estimate_fear_greed()
 
 
-def fetch_reddit_sentiment(limit=5):
-    url = f"https://www.reddit.com/r/wallstreetbets/hot.json?limit={limit}"
-    headers = {"User-Agent": "market-newsletter-bot/1.0"}
-    posts = []
-
+def _estimate_fear_greed():
     try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            payload = json.loads(resp.read().decode())
-        for child in payload.get("data", {}).get("children", []):
-            post = child.get("data", {})
-            title = post.get("title")
-            permalink = post.get("permalink")
-            score = post.get("score")
-            if title and permalink:
-                posts.append({
-                    "title": title,
-                    "link": f"https://www.reddit.com{permalink}",
-                    "score": score,
-                })
+        vix_hist = yf.Ticker("^VIX").history(period="1y")
+        if vix_hist.empty:
+            return {"score": None, "rating": None, "estimated": True}
+        current_vix = float(vix_hist["Close"].iloc[-1])
+        vix_low = float(vix_hist["Close"].min())
+        vix_high = float(vix_hist["Close"].max())
+        if vix_high == vix_low:
+            return {"score": None, "rating": None, "estimated": True}
+        normalized = (current_vix - vix_low) / (vix_high - vix_low)
+        score = round((1 - normalized) * 100)
+        if score >= 75:
+            rating = "Extreme Greed"
+        elif score >= 55:
+            rating = "Greed"
+        elif score >= 45:
+            rating = "Neutral"
+        elif score >= 25:
+            rating = "Fear"
+        else:
+            rating = "Extreme Fear"
+        return {"score": score, "rating": rating, "estimated": True}
     except Exception:
-        pass
-
-    return posts
+        return {"score": None, "rating": None, "estimated": True}
 
 
 def fetch_all():
@@ -125,5 +315,5 @@ def fetch_all():
         "stocks": fetch_stock_data(),
         "macro": fetch_macro_data(),
         "fear_greed": fetch_fear_greed(),
-        "reddit": fetch_reddit_sentiment(),
+        "reddit": fetch_reddit_top_posts(),
     }
