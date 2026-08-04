@@ -126,9 +126,12 @@ def fetch_congress_trades(tickers, days=45):
             req = urllib.request.Request(url, headers=BROWSER_HEADERS)
             with urllib.request.urlopen(req, timeout=15) as resp:
                 records = json.loads(resp.read().decode())
-        except Exception:
+            print(f"[congress] fetched {len(records)} records from {url}")
+        except Exception as e:
+            print(f"[congress] FAILED fetching {url}: {e}")
             continue
 
+        matched = 0
         for rec in records:
             ticker = (rec.get("ticker") or "").strip().upper()
             if ticker not in tickers:
@@ -145,12 +148,16 @@ def fetch_congress_trades(tickers, days=45):
             if parsed is None or parsed < cutoff:
                 continue
 
+            matched += 1
             tx_type = (rec.get("type") or rec.get("transaction_type") or "").lower()
             if "purchase" in tx_type or "buy" in tx_type:
                 counts[ticker]["buys"] += 1
             elif "sale" in tx_type or "sell" in tx_type:
                 counts[ticker]["sells"] += 1
 
+        print(f"[congress] {matched} records matched tracked tickers within {days} days from {url}")
+
+    print(f"[congress] final counts: {counts}")
     return counts
 
 
