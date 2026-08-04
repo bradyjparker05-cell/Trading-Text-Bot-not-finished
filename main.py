@@ -1,12 +1,12 @@
-from market_scanner import get_market_sentiment, build_sms
-from sms_sender import send_sms
+from data_fetcher import fetch_all
+from email_builder import build_email
+from email_sender import send_email
 
 
 def main():
-    results = get_market_sentiment()
-    message = build_sms(results)
-    print(message)
-    send_sms(message)
+    data = fetch_all()
+    subject, html = build_email(data)
+    send_email(subject, html)
 
 
 if __name__ == "__main__":
